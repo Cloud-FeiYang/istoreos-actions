@@ -9,11 +9,10 @@ on:
         required: false
         default: 'false'
   schedule:
-   - cron: 0 16 * * *
+    - cron: 0 16 * * *
 
 env:
   REPO_URL: https://github.com/Cloud-FeiYang/istoreos
-  # REPO_BRANCH: main
   FEEDS_CONF: feeds.conf
   CONFIG_FILE: .config
   DIY_P1_SH: diy-part1.sh
@@ -22,17 +21,21 @@ env:
   UPLOAD_FIRMWARE: true
   UPLOAD_RELEASE: true
   TZ: Asia/Shanghai
-  GITHUB_TOKEN: ${{ secrets.ACCESS_TOKEN }}
+  # 修复 1：改用系统内置 GITHUB_TOKEN，避免因 ACCESS_TOKEN 为空报错
+  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
 jobs:
   build:
     runs-on: ${{ matrix.os }}
+    # 修复 2：补充仓库写入权限（用于发布 Release 和删除历史记录）
+    permissions:
+      contents: write
+      actions: write
+
     strategy:
       matrix:
         REPO_BRANCH:
-          # - main
           - istoreos-22.03
-          # - istoreos-23.05
         ARCHITECTURE:
           - rk33xx
           - rk35xx
@@ -43,12 +46,11 @@ jobs:
           - REPO_BRANCH: istoreos-23.05
             ARCHITECTURE: x86-alpha
             os: ubuntu-22.04
-
       fail-fast: false
 
     steps:
     - name: 准备完成
-      uses: actions/checkout@main
+      uses: actions/checkout@v4
 
     - name: 检查服务器配置
       run: |
@@ -61,7 +63,7 @@ jobs:
         sudo lshw -short -C memory | grep GiB
         echo -e "\n"
         echo -e "------------------------------- 磁盘信息 -------------------------------\n"
-        echo -e "磁盘数量: $(ls /dev/sd* | grep -v [1-9] | wc -l) \n"
+        echo -e "磁盘数量: $(ls /dev/sd* 2>/dev/null | grep -v [1-9] | wc -l) \n"
         echo "------------------------------- 磁盘详情 -------------------------------\n"
         df -Th
 
@@ -74,11 +76,12 @@ jobs:
         sudo -E apt-get -qq update
         sudo -E apt-get -qq install $(cat $GITHUB_WORKSPACE/depends/${{ matrix.os }})
         wget https://bootstrap.pypa.io/pip/3.6/get-pip.py
-        sudo python3 get-pip.py
+        sudo python3 get-pip.py || true
         sudo rm -rf get-pip.py
-        sudo pip install pyelftools
+        sudo pip install pyelftools || true
         echo "------------------------------- 清理Docker镜像和软件 -------------------------------"
-        docker rmi `docker images -q`
+        # 修复 3：安全清理 Docker，防止无镜像时 docker rmi 报错退出中断构建
+        docker images -q | xargs -r docker rmi 2>/dev/null || true
         docker image prune -a -f
         sudo -E apt-get -y purge azure-cli ghc* zulu* hhvm llvm* firefox google* dotnet* powershell openjdk* adoptopenjdk* mysql* php* mongodb* dotnet* moby* snapd* android* || true
         sudo -E apt-get -qq autoremove --purge
@@ -129,7 +132,7 @@ jobs:
 
     - name: SSH 连接到 Actions
       uses: P3TERX/ssh2actions@v1.0.0
-      if: (github.event.inputs.ssh == 'true' && github.event.inputs.ssh  != 'false') || contains(github.event.action, 'ssh')
+      if: (github.event.inputs.ssh == 'true' && github.event.inputs.ssh != 'false') || contains(github.event.action, 'ssh')
       env:
         TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
@@ -150,40 +153,42 @@ jobs:
         echo -e "$(nproc) thread compile"
         make -j$(nproc) || make -j1 || make -j1 V=s
         echo "FILE_DATE=_$(date +"%Y%m%d%H%M")" >> $GITHUB_ENV
-        echo "::set-output name=status::success"
+        # 修复 4：替换已弃用的 set-output 语法为现代 $GITHUB_OUTPUT 规范
+        echo "status=success" >> $GITHUB_OUTPUT
 
     - name: 检查磁盘空间
       if: (!cancelled())
       run: df -hT
 
     - name: 上传 bin 文件夹
-      uses: actions/upload-artifact@main
+      uses: actions/upload-artifact@v4
       if: steps.compile.outputs.status == 'success' && env.UPLOAD_BIN_DIR == 'true'
       with:
-        name: OpenWrt_bin${{ env.FILE_DATE }}
+        name: OpenWrt_bin_${{ matrix.ARCHITECTURE }}_${{ matrix.REPO_BRANCH }}${{ env.FILE_DATE }}
         path: openwrt/bin
 
     - name: 整理固件文件
       id: organize
-      if: env.UPLOAD_FIRMWARE == 'true' && !cancelled()
+      # 修复 5：严格要求仅在编译成功时运行，避免未编译就 cd 找文件导致报错
+      if: steps.compile.outputs.status == 'success' && env.UPLOAD_FIRMWARE == 'true' && !cancelled()
       run: |
         cd openwrt/bin/targets/*/*
         rm -rf packages
         echo "FIRMWARE=$PWD" >> $GITHUB_ENV
-        echo "::set-output name=status::success"
+        echo "status=success" >> $GITHUB_OUTPUT
 
     - name: 上传固件目录
-      uses: actions/upload-artifact@main
+      uses: actions/upload-artifact@v4
       if: steps.organize.outputs.status == 'success' && !cancelled()
       with:
-        name: OpenWrt_firmware${{ env.FILE_DATE }}
+        name: OpenWrt_firmware_${{ matrix.ARCHITECTURE }}_${{ matrix.REPO_BRANCH }}${{ env.FILE_DATE }}
         path: ${{ env.FIRMWARE }}
 
     - name: 生成发布标签
       id: tag
       if: steps.compile.outputs.status == 'success' && env.UPLOAD_RELEASE == 'true' && !cancelled()
       run: |
-        echo "::set-output name=release_tag::$(date +"%Y.%m.%d-%H.%M")"
+        echo "release_tag=$(date +"%Y.%m.%d-%H.%M")" >> $GITHUB_OUTPUT
         touch release.txt
         echo "
         💻 架构: ${{ matrix.ARCHITECTURE }}
@@ -199,10 +204,10 @@ jobs:
         👤 用户名: root
 
         🔒 密码: password " >> release.txt
-        echo "::set-output name=status::success"
+        echo "status=success" >> $GITHUB_OUTPUT
 
     - name: 自动发布固件到 Releases
-      uses: softprops/action-gh-release@v1
+      uses: softprops/action-gh-release@v2
       if: steps.tag.outputs.status == 'success' && !cancelled()
       with:
         tag_name: ${{ steps.tag.outputs.release_tag }}
@@ -211,14 +216,17 @@ jobs:
 
     - name: 删除运行记录
       uses: GitRML/delete-workflow-runs@main
+      if: (!cancelled())
       with:
         retain_days: 1
         keep_minimum_runs: 1
-        token: ${{ env.GITHUB_TOKEN }}
+        token: ${{ secrets.GITHUB_TOKEN }}
 
     - name: 删除自动发布的旧固件
-      uses: dev-drprasad/delete-older-releases@v0.1.0
-      if: env.UPLOAD_RELEASE == 'true' && !cancelled()
+      uses: dev-drprasad/delete-older-releases@v0.3.3
+      if: steps.compile.outputs.status == 'success' && env.UPLOAD_RELEASE == 'true' && !cancelled()
       with:
         keep_latest: 4
         delete_tags: true
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
