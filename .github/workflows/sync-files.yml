@@ -9,6 +9,10 @@ on:
 jobs:
   sync:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: write
+      
     steps:
     - name: 准备完成
       uses: actions/checkout@v2
@@ -34,7 +38,7 @@ jobs:
     - name: 同步配置
       uses: peaceiris/actions-gh-pages@v3
       with:
-        personal_token: ${{ secrets.ACCESS_TOKEN }}
+        github_token: ${{ secrets.GITHUB_TOKEN }}
         publish_branch: main
         publish_dir: ./
         user_name: 'GitHub Action'
